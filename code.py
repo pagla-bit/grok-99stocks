@@ -25,61 +25,65 @@ LARGE_CAP_TICKERS = ['UBER', 'ANET', 'NOW', 'LRCX', 'PDD', 'ISRG', 'INTU', 'BX',
 @st.cache_data(ttl=300)  # Cache for 5 min to avoid API spam
 def fetch_stock_data(ticker, period='6mo'):
     try:
-        data = yf.download(ticker, period=period, progress=False)  # Suppress progress bar
+        data = yf.download(ticker, period=period, progress=False)
+        # Fix for yfinance MultiIndex columns (single ticker -> droplevel)
+        if not data.empty and isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.droplevel(1)
         info = yf.Ticker(ticker).info
         return data, info
     except Exception as e:
-        st.warning(f"Fetch failed for {ticker}: {str(e)[:50]}...")  # Log lightly
+        st.warning(f"Fetch failed for {ticker}: {str(e)[:50]}...")
         return pd.DataFrame(), {}
 
 def calculate_rsi(data, window=14):
     if len(data) < window:
-        return 50  # Neutral fallback
+        return 50.0
     delta = data['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
-    return rsi.iloc[-1]
+    return float(rsi.iloc[-1])  # Ensure scalar
 
 def calculate_macd(data, fast=12, slow=26, signal=9):
     if len(data) < slow:
-        return 0
+        return 0.0
     ema_fast = data['Close'].ewm(span=fast).mean()
     ema_slow = data['Close'].ewm(span=slow).mean()
     macd = ema_fast - ema_slow
     signal_line = macd.ewm(span=signal).mean()
-    return macd.iloc[-1] - signal_line.iloc[-1]
+    return float(macd.iloc[-1] - signal_line.iloc[-1])
 
 def get_profit_potential(data, days=5, target_type='short'):
     if len(data) < days:
-        return 0
-    current = data['Close'].iloc[-1]
+        return 0.0
+    current = float(data['Close'].iloc[-1])  # Ensure scalar
     if target_type == 'short':
-        high_recent = data['High'].tail(days).max()
-        return ((high_recent - current) / current * 100)
+        high_recent = float(data['High'].tail(days).max())
+        potential = ((high_recent - current) / current * 100)
     elif target_type == 'mid':
         macd_score = calculate_macd(data)
-        vol = data['Close'].pct_change().std() * np.sqrt(14)  # 2-week annualized vol
-        return (macd_score / vol * 10) if vol > 0 else 0  # Scaled to %
-    else:  # long
+        vol = data['Close'].pct_change().std() * np.sqrt(14)
+        potential = (macd_score / vol * 10) if vol > 0 else 0.0
+    else:  # long (fallback for 'small'/'large')
         if len(data) < 50:
-            return 0
-        roc_50 = ((data['Close'].iloc[-1] / data['Close'].iloc[-50]) - 1) * 100
-        return roc_50 * 3  # Simple 3-month projection
+            return 0.0
+        roc_50 = ((current / float(data['Close'].iloc[-50])) - 1) * 100
+        potential = roc_50 * 3
+    return float(potential)  # Force scalar, strip any lingering Series
 
 def get_additional_metric(ticker, metric='volume_surge'):
     data, info = fetch_stock_data(ticker, '1mo')
     if data.empty:
-        return 0
+        return 0.0
     if metric == 'volume_surge':
-        avg_vol = data['Volume'].mean()
-        current_vol = data['Volume'].iloc[-1]
-        return (current_vol / avg_vol) if avg_vol > 0 else 0
+        avg_vol = float(data['Volume'].mean())
+        current_vol = float(data['Volume'].iloc[-1])
+        return current_vol / avg_vol if avg_vol > 0 else 0.0
     elif metric == 'rsi':
         return calculate_rsi(data)
     elif metric == 'beta':
-        return info.get('beta', 1.0)
+        return float(info.get('beta', 1.0))
 
 # Streamlit App
 st.set_page_config(page_title="99 Stocks Dashboard", layout="wide")
@@ -101,7 +105,7 @@ selected_ticker = st.sidebar.selectbox("View Candlestick Chart", [""] + all_tick
 
 col1, col2, col3 = st.columns(3)
 
-# Function to build and display table
+# Function to build and display table (cache on tickers + targets for reactivity)
 @st.cache_data(ttl=300)
 def build_table_df(tickers, cap_type, target):
     df_list = []
@@ -109,15 +113,18 @@ def build_table_df(tickers, cap_type, target):
         data, info = fetch_stock_data(ticker)
         if data.empty:
             continue
-        potential = get_profit_potential(data, target_type=cap_type.lower())
+        # Map cap_type to algo type
+        algo_type = 'short' if cap_type == 'Small' else 'mid' if cap_type == 'Mid' else 'long'
+        potential = get_profit_potential(data, target_type=algo_type)
         if potential < target:
             continue
         score = potential
-        add_metric = get_additional_metric(ticker, 'volume_surge' if cap_type == 'Small' else 'rsi' if cap_type == 'Mid' else 'beta')
+        add_metric_key = 'volume_surge' if cap_type == 'Small' else 'rsi' if cap_type == 'Mid' else 'beta'
+        add_metric = get_additional_metric(ticker, add_metric_key)
         df_list.append({
             'Ticker': ticker,
             'Name': info.get('longName', ticker),
-            'Price': round(data['Close'].iloc[-1], 2),
+            'Price': round(float(data['Close'].iloc[-1]), 2),
             'Potential %': round(potential, 2),
             'Score': round(score, 2),
             'Add. Metric': round(add_metric, 2)
@@ -135,7 +142,7 @@ def display_table(tickers, cap_type, target, col):
         else:
             st.warning("No stocks meet the target—lower the slider or check data fetch.")
 
-# Build tables
+# Build tables (now with correct algo mapping)
 display_table(SMALL_CAP_TICKERS, 'Small', short_target, col1)
 display_table(MID_CAP_TICKERS, 'Mid', mid_target, col2)
 display_table(LARGE_CAP_TICKERS, 'Large', long_target, col3)
@@ -150,7 +157,6 @@ if selected_ticker:
         fig.add_trace(go.Candlestick(x=data.index, open=data['Open'], high=data['High'],
                                      low=data['Low'], close=data['Close'], name='Candlestick'),
                       row=1, col=1)
-        colors = ['green' if data['Close'][i] >= data['Open'][i] else 'red' for i in range(len(data))]
         fig.add_trace(go.Bar(x=data.index, y=data['Volume'], name='Volume', 
                              marker_color='rgba(0,0,0,0.3)'), row=2, col=1)
         fig.update_layout(xaxis_rangeslider_visible=False, height=600, showlegend=False)

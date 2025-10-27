@@ -22,6 +22,14 @@ LARGE_CAP_TICKERS = ['UBER', 'ANET', 'NOW', 'LRCX', 'PDD', 'ISRG', 'INTU', 'BX',
                      'BA', 'APH', 'VZ', 'KLAC', 'TJX', 'GEV', 'AMGN', 'ACN', 'DHR', 'UL',
                      'TXN', 'SPGI', 'BSX']
 
+# Initialize session state for applied targets
+if 'applied_short' not in st.session_state:
+    st.session_state.applied_short = 5.0
+if 'applied_mid' not in st.session_state:
+    st.session_state.applied_mid = 10.0
+if 'applied_long' not in st.session_state:
+    st.session_state.applied_long = 30.0
+
 @st.cache_data(ttl=300)  # Cache for 5 min to avoid API spam
 def fetch_stock_data(ticker, period='6mo'):
     try:
@@ -89,23 +97,33 @@ def get_additional_metric(ticker, metric='volume_surge'):
 st.set_page_config(page_title="99 Stocks Dashboard", layout="wide")
 st.title("99 Stocks Dashboard: Segmented Opportunities by Market Cap & Horizon")
 
-# Sidebars for sliders
+# Sidebars for sliders and on-demand refresh
 with st.sidebar:
     st.header("Profit Target Adjustments")
-    short_target = st.slider("Short-Term (Table 1: 1-3 days)", 0.0, 100.0, 5.0)
-    mid_target = st.slider("Mid-Term (Table 2: 1-2 weeks)", 0.0, 100.0, 10.0)
-    long_target = st.slider("Long-Term (Table 3: 1-3 months)", 0.0, 100.0, 30.0)
-    if st.button("Refresh Data"):
+    temp_short = st.slider("Short-Term (Table 1: 1-3 days)", 0.0, 100.0, float(st.session_state.applied_short))
+    temp_mid = st.slider("Mid-Term (Table 2: 1-2 weeks)", 0.0, 100.0, float(st.session_state.applied_mid))
+    temp_long = st.slider("Long-Term (Table 3: 1-3 months)", 0.0, 100.0, float(st.session_state.applied_long))
+    
+    st.info(f"Current Applied: Short={st.session_state.applied_short}%, Mid={st.session_state.applied_mid}%, Long={st.session_state.applied_long}%")
+    
+    if st.button("Apply Changes & Refresh"):
+        st.session_state.applied_short = temp_short
+        st.session_state.applied_mid = temp_mid
+        st.session_state.applied_long = temp_long
+        st.cache_data.clear()
+        st.rerun()
+    
+    if st.button("Force Full Refresh (Data Only)"):
         st.cache_data.clear()
         st.rerun()
 
-# Selected stock for chart
+# Selected stock for chart (uses current data, independent of targets)
 all_tickers = SMALL_CAP_TICKERS + MID_CAP_TICKERS + LARGE_CAP_TICKERS
 selected_ticker = st.sidebar.selectbox("View Candlestick Chart", [""] + all_tickers)
 
 col1, col2, col3 = st.columns(3)
 
-# Function to build and display table (cache on tickers + targets for reactivity)
+# Function to build and display table (cache on tickers + applied targets for on-demand)
 @st.cache_data(ttl=300)
 def build_table_df(tickers, cap_type, target):
     df_list = []
@@ -142,12 +160,12 @@ def display_table(tickers, cap_type, target, col):
         else:
             st.warning("No stocks meet the target—lower the slider or check data fetch.")
 
-# Build tables (now with correct algo mapping)
-display_table(SMALL_CAP_TICKERS, 'Small', short_target, col1)
-display_table(MID_CAP_TICKERS, 'Mid', mid_target, col2)
-display_table(LARGE_CAP_TICKERS, 'Large', long_target, col3)
+# Build tables using applied targets (only refreshes on-demand)
+display_table(SMALL_CAP_TICKERS, 'Small', st.session_state.applied_short, col1)
+display_table(MID_CAP_TICKERS, 'Mid', st.session_state.applied_mid, col2)
+display_table(LARGE_CAP_TICKERS, 'Large', st.session_state.applied_long, col3)
 
-# Candlestick Chart
+# Candlestick Chart (always available, uses cached data)
 if selected_ticker:
     st.header(f"Candlestick Chart: {selected_ticker}")
     data, _ = fetch_stock_data(selected_ticker, '6mo')
@@ -162,7 +180,7 @@ if selected_ticker:
         fig.update_layout(xaxis_rangeslider_visible=False, height=600, showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
 
-# Heatmap of All 99
+# Heatmap of All 99 (refreshes on-demand via shared cache)
 st.header("Profit Potential Heatmap (All 99 Stocks)")
 heatmap_data = []
 for ticker in all_tickers:
